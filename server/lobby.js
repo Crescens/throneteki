@@ -13,7 +13,7 @@ const ServiceFactory = require('./services/ServiceFactory');
 const DeckService = require('./services/DeckService.js');
 const CardService = require('./services/CardService.js');
 const UserService = require('./services/UserService.js');
-const { sortBy } = require('../Array');
+const { sortBy } = require('./Array');
 
 class Lobby {
     constructor(server, options = {}) {
@@ -28,6 +28,7 @@ class Lobby {
         this.router = options.router || new GameRouter(this.config);
 
         this.router.on('onGameClosed', this.onGameClosed.bind(this));
+        this.router.on('onGameRematch', this.onGameRematch.bind(this));
         this.router.on('onPlayerLeft', this.onPlayerLeft.bind(this));
         this.router.on('onWorkerTimedOut', this.onWorkerTimedOut.bind(this));
         this.router.on('onNodeReconnected', this.onNodeReconnected.bind(this));
@@ -461,7 +462,7 @@ class Lobby {
             return;
         }
 
-        if(game.getPlayers().some(player => {
+        if(Object.values(game.getPlayers()).some(player => {
             return !player.deck;
         })) {
             return;
@@ -577,7 +578,7 @@ class Lobby {
         this.messageService.addMessage(chatMessage);
     }
 
-    onSelectDeck(socket, gameId, deckId) {
+    onSelectDeck(socket, gameId, deckId, cb) {
         let game = this.games[gameId];
         if(!game) {
             return;
@@ -593,9 +594,17 @@ class Lobby {
                 game.selectDeck(socket.user.username, formattedDeck);
 
                 this.sendGameState(game);
+
+                if(cb) {
+                    cb();
+                }
             })
             .catch(err => {
                 logger.info(err);
+
+                if(cb) {
+                    cb(err);
+                }
 
                 return;
             });
@@ -667,8 +676,46 @@ class Lobby {
         }
 
         delete this.games[gameId];
+        this.broadcastGameList();
+    }
+
+    onGameRematch(oldGame) {
+        let gameId = oldGame.gameId;
+        let game = this.games[gameId];
+
+        if(!game) {
+            return;
+        }
+
+        delete this.games[gameId];
+
+        let newGame = new PendingGame(game.owner, {
+            spectators: game.allowSpectators,
+            showHand: game.showHand,
+            gameType: game.gameType,
+            isMelee: game.isMelee,
+            useRookery: game.useRookery
+        });
+
+        let socket = this.sockets[game.getPlayerOrSpectator(game.owner.username).id];
+
+        newGame.newGame(socket.id, socket.user.getDetails());
+        newGame.password = game.password;
+
+        socket.joinChannel(newGame.id);
+        this.sendGameState(newGame);
+
+        this.games[newGame.id] = newGame;
 
         this.broadcastGameList();
+
+        this.onSelectDeck(socket, newGame.id, game.getPlayers()[newGame.owner.username].deck._id, (err) => {
+            if(err) {
+                return;
+            }
+
+            this.onStartGame(socket, newGame.id);
+        });
     }
 
     onPlayerLeft(gameId, player) {
